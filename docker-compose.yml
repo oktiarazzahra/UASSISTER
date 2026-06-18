@@ -1,0 +1,71 @@
+version: "3.9"
+
+services:
+  broker:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - broker_data:/data
+    restart: unless-stopped
+
+  storage:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: pubsub
+      POSTGRES_USER: pubsub
+      POSTGRES_PASSWORD: pubsub123
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pubsub -d pubsub"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  aggregator:
+    build:
+      context: ./aggregator
+    environment:
+      POSTGRES_DSN: postgresql://pubsub:pubsub123@storage:5432/pubsub
+      REDIS_URL: redis://broker:6379/0
+      LOG_LEVEL: INFO
+      ENABLE_WORKERS: "1"
+    ports:
+      - "8080:8080"
+    depends_on:
+      broker:
+        condition: service_healthy
+      storage:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD-SHELL"
+        - "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health').read()\""
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  publisher:
+    build:
+      context: ./publisher
+    environment:
+      REDIS_URL: redis://broker:6379/0
+      EVENTS_PER_SECOND: 50
+      LOG_LEVEL: INFO
+    depends_on:
+      broker:
+        condition: service_healthy
+      aggregator:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  broker_data:
