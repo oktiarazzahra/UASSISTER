@@ -8,7 +8,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import asyncpg
-from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import ValidationError
@@ -17,7 +17,7 @@ from redis.asyncio import Redis
 from . import database
 from .dedup import process_event
 from .models import Event, EventBatch
-from .worker import consume_loop
+from .worker import GROUP_NAME, consume_loop
 
 logger = logging.getLogger(__name__)
 
@@ -143,19 +143,28 @@ def _normalize_events(payload: Any) -> list[Event]:
 
 @app.post("/publish")
 
-async def publish_event(request: Request, payload: Any):
+async def publish_event(request: Request, payload: Any = Body(...)):
 	"""Terima event tunggal atau batch, lalu push ke Redis stream per topic."""
-	_, redis_client = await _ensure_ready(request)
+	db_pool, redis_client = await _ensure_ready(request)
 
 	events = _normalize_events(payload)
 	if not events:
 		return JSONResponse({"received": 0, "message": "Tidak ada event untuk diproses"})
 
+	process_sync = os.getenv("PROCESS_EVENTS_SYNC", "0") == "1"
 	for event in events:
-		await redis_client.xadd(
+		message_id = await redis_client.xadd(
 			f"events:{event.topic}",
 			{"event": event.model_dump_json()},
 		)
+		if process_sync:
+			await process_event(event, db_pool)
+			try:
+				await redis_client.xgroup_create(f"events:{event.topic}", GROUP_NAME, id="0", mkstream=True)
+			except Exception as exc:
+				if "BUSYGROUP" not in str(exc):
+					raise
+			await redis_client.xack(f"events:{event.topic}", GROUP_NAME, message_id)
 
 	return JSONResponse(
 		{"received": len(events), "message": f"Berhasil menerima {len(events)} event"}
@@ -181,7 +190,16 @@ async def get_events(
 	async with db_pool.acquire() as connection:
 		rows = await connection.fetch(query, topic, limit, offset)
 
-	events = [dict(row) for row in rows]
+	events = [
+		{
+			"topic": row["topic"],
+			"event_id": row["event_id"],
+			"source": row["source"],
+			"payload": row["payload"],
+			"received_at": row["received_at"].isoformat(),
+		}
+		for row in rows
+	]
 	return JSONResponse(events)
 
 

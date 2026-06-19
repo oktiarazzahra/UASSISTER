@@ -5,18 +5,15 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY requirements.txt ./requirements.txt
+COPY aggregator/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY main.py ./main.py
-COPY worker.py ./worker.py
-COPY database.py ./database.py
-COPY dedup.py ./dedup.py
-COPY models.py ./models.py
+COPY aggregator ./aggregator
+COPY tests ./tests
 
 RUN useradd --create-home --shell /bin/bash appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8080
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
+CMD ["uvicorn", "aggregator.main:app", "--host", "0.0.0.0", "--port", "8080", "--workers", "1"]
